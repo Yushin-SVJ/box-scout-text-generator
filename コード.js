@@ -28,6 +28,7 @@ function generateScoutMails() {
 
   const values = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
   let processed = 0;
+  let recentPatterns = []; // 直近のパターンを記録（多様性確保用）
 
   for (let i = 0; i < values.length; i++) {
     if (processed >= MAX_PER_RUN) break;
@@ -45,7 +46,8 @@ function generateScoutMails() {
       continue;
     }
 
-    const prompt = buildPromptForCompany(companyName, companyInfo);
+    // 直近2件のパターンを渡して多様性を確保
+    const prompt = buildPromptForCompany(companyName, companyInfo, recentPatterns);
     const responseText = callGemini(prompt);
     if (!responseText) {
       Logger.log(`Row ${rowIndex}: Geminiからレスポンスが得られませんでした。`);
@@ -78,6 +80,13 @@ function generateScoutMails() {
     const outBody = json.body || '';
     const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
 
+    // 直近パターンを更新（多様性確保用）
+    if (outPattern) {
+      const structureOnly = outPattern.charAt(0); // A, B, C のみ抽出
+      recentPatterns.push(structureOnly);
+      if (recentPatterns.length > 2) recentPatterns.shift(); // 直近2件のみ保持
+    }
+
     sheet.getRange(rowIndex, 1).setValue(outCompany);
     sheet.getRange(rowIndex, 3).setValue(outSubject);
     sheet.getRange(rowIndex, 4).setValue(outBody);
@@ -93,11 +102,26 @@ function generateScoutMails() {
 /**
  * 企業ごとのプロンプトを生成
  * - ここに「STEP1〜3をAIの内部でやらせる」設計を埋め込んでいる
+ * @param {string} companyName
+ * @param {string} companyInfo
+ * @param {string[]} recentPatterns - 直近のパターン配列（多様性確保用）
  */
-function buildPromptForCompany(companyName, companyInfo) {
+function buildPromptForCompany(companyName, companyInfo, recentPatterns = []) {
   const infoText = companyInfo && companyInfo.trim()
     ? companyInfo.trim()
     : '企業URLや求人要約などの詳細情報は与えられていません。一般的な情報に基づき、過度な推測は避けてください。';
+
+  // 多様性強制ルールの文言を生成
+  let diversityRule = '';
+  if (recentPatterns.length >= 2 && recentPatterns[0] === recentPatterns[1]) {
+    const avoidPattern = recentPatterns[0];
+    diversityRule = `
+【多様性強制ルール（最優先）】
+直前2件が「${avoidPattern}」構造で連続しています。
+今回は必ず「${avoidPattern}」以外の構造（${avoidPattern === 'A' ? 'B または C' : avoidPattern === 'B' ? 'A または C' : 'A または B'}）を選択してください。
+pattern_reason に「多様性確保のため」と明記すること。
+`;
+  }
 
   const FIXED_FOOTER = `
   ▼ 私が提供できる価値
@@ -159,30 +183,58 @@ Speee / メルカリ / レバレジーズ
    - 会社概要の要約（200文字程度）
    を頭の中で整理する。
 
-2. 構造（A/B/C）とモード（1/2）を「企業特性に合わせて」1つ選ぶ。B列は空の前提なので、必要な企業情報はAI内部で補完して判断すること。
-  【構造の選択基準】
-  - A（網羅型）：企業情報が豊富で、複数の魅力（事業規模・成長性・環境など）を整理して伝えられる場合
-  - B（手紙型）：創業ストーリーや事業転換、シリーズ調達など「今が転機」である要素をストーリーとして訴求したい場合
-  - C（要点直球型）：公開情報が限られる、または候補者に3つの理由だけを素早く届けたい場合
+2. 構造（A/B/C）とモード（1/2）を「企業特性に合わせて」1つ選ぶ。
+${diversityRule}
 
-  【若手（20〜30代）キャリアアップ層への追加指針】
-  - キャリアの跳躍・裁量拡大・スピード感を訴求できる → B・1（情熱）を優先
-  - スキル証明や成果志向・クイック判断が求められる → C・1
-  - すでに実績が豊富なSaaSや上場企業で、安定×成長を示したい → A・2
-  - 補完情報に「シリーズB以上、ARR/顧客数、受賞歴」など定量が多い → Aを優先
-  - 「0→1」「事業立ち上げ」「リーダー候補」といったキーワードが多い → B
-  - 同じパターンが連続した場合は、次件で別パターンを優先的に検討すること（多様性確保）
+  【構造（A/B/C）の選定基準】
+  企業の「知名度」と「情報の複雑性」で判断します。
 
-  【モードの選択基準】
-  - 1（情熱キャリアモード）：成長機会や将来ビジョンを重視する場合（特に若手ハイポ層）
-  - 2（市場分析モード）：実績・安定性・優位性を論理的に示す場合
+  ■ A（網羅型 / リクルート式）
+  - 対象: 複雑なビジネスモデルの企業、または制度・環境が整っているメガベンチャー
+  - 理由: 「何をしている会社か」を丁寧に説明しないと魅力が伝わらない、または福利厚生・環境などの「安心材料」が強い武器になる場合
+  - 適用シグナル: 事業が多角化している、BtoB×BtoCの両面がある、複数プロダクトを持つ
+
+  ■ B（手紙型 / ナラティブ式）
+  - 対象: 創業初期（シード〜アーリー）、または大きな変革期（第二創業期）にある企業
+  - 理由: 条件面や知名度では競合に劣る可能性があるため、「なぜ今やるのか」「どんな世界を作りたいか」というストーリー（物語）で共感を呼ぶ必要がある場合
+  - 適用シグナル: 「0→1」「事業立ち上げ」「リーダー候補」「シリーズA〜B」「第二創業」などのキーワード
+
+  ■ C（要点直球型 / 箇条書き式）
+  - 対象: 圧倒的な知名度がある企業、またはハイレイヤー・エンジニアなど「忙しい層」がターゲットの場合
+  - 理由: 長い前置きが不要、または逆効果になる層に対し、「あなたが必要な理由」だけを端的に突き刺す方が好まれる場合
+  - 適用シグナル: 東証プライム上場、業界の代名詞的存在（例: 名刺管理=Sansan）、累計調達100億円以上、エンジニア専門職向け
+
+  【知名度の判定シグナル】
+  - 高: 上場企業（東証プライム/グロース/スタンダード）、累計調達100億円以上、業界内の「代名詞」的存在
+  - 中: 業界内で有名、メディア露出あり、社員数500名以上
+  - 低: 一般的には無名、シード〜アーリー期
+  ※ 知名度が「高」で、かつターゲット層が「ハイレイヤー/エンジニア」なら C を最優先
+
+  【構造選択の優先ルール】
+  1. まず「ターゲット層」を確認 → ハイレイヤー/エンジニア向けで知名度高 → C を最優先
+  2. 次に「企業フェーズ」を確認 → シード〜アーリー/変革期 → B
+  3. それ以外で「ビジネスモデルが複雑 or 安心材料が強い」→ A
+  4. 上記に該当しない場合 → デフォルトは C（短く刺す）
+
+  【モード（1/2）の選定基準】
+  企業の「勝ち筋」と、ターゲットが求める「キャリアの価値観」で判断します。
+
+  ■ 1（情熱キャリアモード / 未来への期待）
+  - キーワード: 社会課題解決、組織づくり、カオス、泥臭さ、ミッションドリブン
+  - 理由: まだ整っていない環境で「自分たちが正解を作っていく」ことに喜びを感じる層がターゲットの場合
+  - 適用: BtoCサービス、ミッションドリブンな組織、スタートアップ
+
+  ■ 2（市場分析モード / 冷静なロジック）
+  - キーワード: SaaS、プラットフォーム、勝ち馬、市場シェア、生産性、ARR
+  - 理由: 「この会社に入れば市場価値が確実に上がる」という合理的な勝算を求める層がターゲットの場合
+  - 適用: Horizontal SaaS、Fintech、コンサル出身者狙い
 
 【重要：出力ルール（必須）】
 - 出力は「JSON のみ」で返してください（他テキストや説明は一切禁止）。
-- JSON に必ず以下のフィールドを含めること（例値を参照）:
+- JSON に必ず以下のフィールドを含めること:
   - "pattern": 選択した組み合わせ（例: "B・1"）
   - "pattern_reason": 選択理由を日本語で「短い一文」（※必須）
-  - pattern_reason には「若手キャリアアップ層」「ストーリー要素」「情報量」など判断根拠を含めること。
+  - pattern_reason には「知名度: 高/中/低」「ターゲット層」「フェーズ」など判断根拠を含めること。
 
 3. 選んだパターンに従って、
   - 候補者向けのメール件名（1つ）
@@ -262,7 +314,7 @@ ${FIXED_FOOTER}
   "subject": "ここにメール件名を1つ",
   "body": "ここに本文全体",
   "pattern": "例: B・1",
-  "pattern_reason": "選択した理由を簡潔に1文で"
+  "pattern_reason": "選択した理由を簡潔に1文で（知名度・ターゲット層・フェーズなどの根拠を含める）"
 }
 
 【入力された企業情報】
@@ -288,7 +340,7 @@ function callGemini(prompt) {
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      temperature: 1.0,  // 0.3 → 1.0 に変更（多様性を増す）
+      temperature: 1.0,
       topP: 0.95,
       topK: 40,
     }
@@ -326,35 +378,27 @@ function callGemini(prompt) {
     return null;
   }
 
-  // 通常は最初のpartにテキストが入る想定
   return content.parts[0].text.trim();
 }
 
 /**
  * モデルの出力テキストからJSON部分を抽出してパースする
- * - ```json ... ``` で囲まれていてもOK
- * - テキストの中から最初の { 〜 最後の } を抜き出してJSON.parse
  */
 function parseResultJson(text) {
   if (!text) return null;
 
   let cleaned = text.trim();
 
-  // コードブロックを除去
   if (cleaned.startsWith('```')) {
-    // ```xxx の1行目を削除
     cleaned = cleaned.replace(/^```[\s\S]*?\n/, '');
-    // 末尾の ``` を削除
     cleaned = cleaned.replace(/```[\s\S]*$/, '');
     cleaned = cleaned.trim();
   }
 
-  // テキスト中の最初の { 〜 最後の } を抜き出す
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
     try {
-      // そのままJSONとしてパースできるか一応試す
       return JSON.parse(cleaned);
     } catch (e) {
       Logger.log('JSON抽出失敗: ' + cleaned);
@@ -373,26 +417,20 @@ function parseResultJson(text) {
 
 /**
  * patternの文字列表記を正規化する（例: "a-2" → "A・2"）
- * @param {any} rawPattern
- * @returns {string}
  */
 function normalizePattern(rawPattern) {
   if (!rawPattern) return '';
 
   const normalized = String(rawPattern)
-    // 全角/半角スペースを除去
     .replace(/[\s\u3000]/g, '')
-    // 区切りを統一
     .replace(/[･・\.\/-]/g, '・')
     .toUpperCase();
 
-  // 行頭〜行末の完全一致を優先
   let match = normalized.match(/^([ABC])・?([12])$/);
   if (match) {
     return `${match[1]}・${match[2]}`;
   }
 
-  // 文字列の途中にパターンが埋もれている場合も拾う
   match = normalized.match(/([ABC])・?([12])/);
   if (match) {
     return `${match[1]}・${match[2]}`;
@@ -403,10 +441,6 @@ function normalizePattern(rawPattern) {
 
 /**
  * JSONにpatternが無い場合、レスポンステキスト全体から推測する
- * @param {any} rawPattern
- * @param {string} responseText
- * @param {number} rowIndex
- * @returns {string}
  */
 function resolvePatternIdentifier(rawPattern, responseText, rowIndex) {
   const normalizedFromJson = normalizePattern(rawPattern);
@@ -423,46 +457,7 @@ function resolvePatternIdentifier(rawPattern, responseText, rowIndex) {
 }
 
 /**
- * 企業情報を Gemini で補完（質を向上させる）
- * - 既存情報が薄い場合のみ実行
- */
-function enrichCompanyInfoViaGemini(companyName, currentInfo) {
-  // 既に具体的なキーワードが含まれていればスキップ（API節約）
-  const hasConcreteInfo = /(シリーズ[A-Z]|資金調達|ARR|売上|上場|IPO|創業\d{4}|社員数\d+|年収\d+)/.test(currentInfo);
-  if (hasConcreteInfo && currentInfo.length >= 300) {
-    return currentInfo;
-  }
-
-  const enrichPrompt = `
-以下の企業について、公開情報を基に情報を補完してください。
-
-【企業名】${companyName}
-
-【現在の情報】
-${currentInfo || '（情報なし）'}
-
-【出力（JSON のみ）】
-{
-  "enriched_info": "以下を含む補完情報（500字以内）:\n- 事業内容\n- 資金調達・成長段階（分かれば）\n- 求める職種・スキル・人材像"
-}
-
-【厳守】捏造禁止。不明なら「〜と推測されます」と記載。JSON以外は出力しない。
-`.trim();
-
-  const responseText = callGemini(enrichPrompt);
-  if (!responseText) return currentInfo;
-
-  const json = parseResultJson(responseText);
-  if (!json || !json.enriched_info) return currentInfo;
-
-  // 元の情報 + 補完情報を結合して返す
-  return `${currentInfo}\n\n【補完情報】\n${json.enriched_info}`.trim();
-}
-
-/**
  * 企業情報を Gemini から取得して整形する
- * @param {string} companyName
- * @returns {string}
  */
 function fetchCompanyProfile(companyName) {
   if (!companyName) return '';
@@ -479,6 +474,8 @@ ${companyName}
   "phase": "事業フェーズ・資金調達状況など（100字以内）",
   "roles": "募集している/相性が良いと想定される職種・ロール（100字以内）",
   "skills": "求めるスキル・価値観・カルチャーフィット（120字以内）",
+  "target_layer": "想定ターゲット層（例: 若手ポテンシャル / ミドルマネジメント / ハイレイヤー / エンジニア専門職）",
+  "recognition": "知名度レベル（高: 上場or累計調達100億以上 / 中: 業界内で有名 / 低: 一般的には無名）",
   "proof_points": [
     "補強できる定量・エピソード（任意、1文）",
     "..."
@@ -501,6 +498,8 @@ ${companyName}
   if (json.phase) segments.push(`【フェーズ】${json.phase}`);
   if (json.roles) segments.push(`【想定ポジション】${json.roles}`);
   if (json.skills) segments.push(`【求める人物像】${json.skills}`);
+  if (json.target_layer) segments.push(`【ターゲット層】${json.target_layer}`);
+  if (json.recognition) segments.push(`【知名度】${json.recognition}`);
 
   if (Array.isArray(json.proof_points) && json.proof_points.length) {
     const proof = json.proof_points.filter(Boolean).map((p, idx) => `・${idx + 1}. ${p}`).join('\n');
