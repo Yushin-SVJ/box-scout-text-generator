@@ -56,6 +56,24 @@ function generateScoutMails() {
       continue;
     }
 
+    // --- 追加: モデルが返した「選択理由」をログに出す（デバッグ用） ---
+    let patternReason = '';
+    if (json.pattern_reason && String(json.pattern_reason).trim()) {
+      patternReason = String(json.pattern_reason).trim();
+    } else if (json.reason && String(json.reason).trim()) {
+      patternReason = String(json.reason).trim();
+    } else {
+      // テキスト中の「理由: ○○」を抽出（改行2つ以上または末尾までを対象）
+      const m = responseText.match(/理由[:：]\s*([\s\S]*?)(?:\n\s*\n|$)/);
+      if (m && m[1]) patternReason = m[1].trim();
+    }
+    if (patternReason) {
+      Logger.log(`Row ${rowIndex}: モデルの選択理由: ${patternReason}`);
+    } else {
+      Logger.log(`Row ${rowIndex}: モデルの選択理由は出力されていませんでした。`);
+    }
+    // --- ここまで追加 ---
+    
     const outCompany = json.company_name || companyName;
     const outSubject = json.subject || '';
     const outBody = json.body || '';
@@ -143,16 +161,25 @@ Speee / メルカリ / レバレジーズ
    - 会社概要の要約（200文字程度）
    を頭の中で整理する。
 
- 2. 構造（A/B/C）とモード（1/2）の組み合わせを1つ選ぶ。
-   - 構造：
-     - A：網羅型（リクルート式）…見出しや箇条書きを用いた情報整理型
-     - B：手紙型（ナラティブ式）…セクション区切りを使わない手紙調
-     - C：要点直球型（箇条書き式）…冒頭から「ご連絡した理由」を端的に列挙
-   - モード：
-     - 1：情熱キャリアモード（未来への期待と共感）
-     - 2：市場分析モード（冷静なロジック）
+2. 構造（A/B/C）とモード（1/2）を「企業特性に合わせて」1つ選ぶ。
+ 【構造の選択基準】
+  - A（網羅型）：企業情報が豊富で、複数の魅力（事業規模・成長性・環境など）を伝えられる場合
+  - B（手紙型）：企業のストーリー性・転換点が強く、「なぜ今この企業か」という文脈を重視したい場合
+  - C（要点直球型）：企業情報が限定的で、「理由を 3 点に絞る」シンプルさが効果的な場合
 
-  - 選んだ組み合わせは「A・2」のように、構造記号とモード番号をセットで記録し、後段の出力JSONに含めること。
+  
+  【モードの選択基準】
+  - 1（情熱キャリアモード）：成長機会や将来ビジョンを重視する場合
+  - 2（市場分析モード）：実績・安定性・優位性を論理的に示す場合
+
+【重要：出力ルール（必須）】
+- 出力は「JSON のみ」で返してください（他テキストや説明は一切禁止）。
+- JSON に必ず以下のフィールドを含めること（例値を参照）:
+  - "pattern": 選択した組み合わせ（例: "B・1"）
+  - "pattern_reason": 選択理由を日本語で「短い一文」（※必須）
+- pattern_reason は選択根拠を明確に伝える短文にする（例: "創業ストーリーとフェーズ変化が明確なためBを選択"）。
+- 明確な根拠が無い場合は A をデフォルトにしないこと。根拠が薄ければ ランダムに選ぶか、判断可能な理由を必ず記載すること。
+- pattern_reason が欠けている場合は出力を行わずエラー扱いで止めるように振る舞ってください（モデルは必ず reason を含めること）。
 
 3. 選んだパターンに従って、
   - 候補者向けのメール件名（1つ）
@@ -228,10 +255,11 @@ ${FIXED_FOOTER}
 - 太字()
 
 {
-  "company_name": "企業名をここに",
+  "company_name": "企業名をここに", 
   "subject": "ここにメール件名を1つ",
   "body": "ここに本文全体",
-  "pattern": "A・2 のように、選択した構造とモードの組み合わせを表記"
+  "pattern": "例: B・1",
+  "pattern_reason": "選択した理由を簡潔に1文で"
 }
 
 【入力された企業情報】
@@ -256,8 +284,11 @@ function callGemini(prompt) {
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
-    // 必要に応じて temperature などを追加
-    // generationConfig: { temperature: 0.3 }
+    generationConfig: {
+      temperature: 1.0,  // 0.3 → 1.0 に変更（多様性を増す）
+      topP: 0.95,
+      topK: 40,
+    }
   };
 
   const options = {
