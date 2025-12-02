@@ -26,9 +26,9 @@ function generateScoutMails() {
     return;
   }
 
-  // A〜E列をまとめて取得
-  const values = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
-  // [A:企業名, B:企業情報, C:件名, D:本文, E:ステータス]
+  // A〜F列をまとめて取得
+  const values = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  // [A:企業名, B:企業情報, C:件名, D:本文, E:ステータス, F:使用パターン]
 
   let processed = 0;
 
@@ -36,7 +36,7 @@ function generateScoutMails() {
     if (processed >= MAX_PER_RUN) break;
 
     const rowIndex = i + 2; // シート上の行番号
-    const [companyName, companyInfo, subject, body, status] = values[i];
+    const [companyName, companyInfo, subject, body, status, patternCode] = values[i];
 
     // 企業名なし or 既にdone or 件名/本文が埋まっている → スキップ
     if (!companyName) continue;
@@ -59,12 +59,14 @@ function generateScoutMails() {
     const outCompany = json.company_name || companyName;
     const outSubject = json.subject || '';
     const outBody = json.body || '';
+    const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
 
     // シートに書き込み
     sheet.getRange(rowIndex, 1).setValue(outCompany); // A:企業名（整形されれば上書き）
     sheet.getRange(rowIndex, 3).setValue(outSubject); // C:件名
     sheet.getRange(rowIndex, 4).setValue(outBody);    // D:本文
     sheet.getRange(rowIndex, 5).setValue('done');     // E:ステータス
+    sheet.getRange(rowIndex, 6).setValue(outPattern); // F:使用パターン（例: A・2）
 
     processed++;
   }
@@ -141,7 +143,7 @@ Speee / メルカリ / レバレジーズ
    - 会社概要の要約（200文字程度）
    を頭の中で整理する。
 
-2. 構造（A/B/C）とモード（1/2）の組み合わせを1つ選ぶ。
+ 2. 構造（A/B/C）とモード（1/2）の組み合わせを1つ選ぶ。
    - 構造：
      - A：網羅型（リクルート式）…見出しや箇条書きを用いた情報整理型
      - B：手紙型（ナラティブ式）…セクション区切りを使わない手紙調
@@ -150,9 +152,11 @@ Speee / メルカリ / レバレジーズ
      - 1：情熱キャリアモード（未来への期待と共感）
      - 2：市場分析モード（冷静なロジック）
 
+  - 選んだ組み合わせは「A・2」のように、構造記号とモード番号をセットで記録し、後段の出力JSONに含めること。
+
 3. 選んだパターンに従って、
-   - 候補者向けのメール件名（1つ）
-   - スカウト本文（1通）
+  - 候補者向けのメール件名（1つ）
+  - スカウト本文（1通）
    を作成する。
 
 【事実・表現に関する厳守ルール】
@@ -226,7 +230,8 @@ ${FIXED_FOOTER}
 {
   "company_name": "企業名をここに",
   "subject": "ここにメール件名を1つ",
-  "body": "ここに本文全体"
+  "body": "ここに本文全体",
+  "pattern": "A・2 のように、選択した構造とモードの組み合わせを表記"
 }
 
 【入力された企業情報】
@@ -330,4 +335,55 @@ function parseResultJson(text) {
     Logger.log('JSONパース失敗: ' + jsonString);
     return null;
   }
+}
+
+/**
+ * patternの文字列表記を正規化する（例: "a-2" → "A・2"）
+ * @param {any} rawPattern
+ * @returns {string}
+ */
+function normalizePattern(rawPattern) {
+  if (!rawPattern) return '';
+
+  const normalized = String(rawPattern)
+    // 全角/半角スペースを除去
+    .replace(/[\s\u3000]/g, '')
+    // 区切りを統一
+    .replace(/[･・\.\/-]/g, '・')
+    .toUpperCase();
+
+  // 行頭〜行末の完全一致を優先
+  let match = normalized.match(/^([ABC])・?([12])$/);
+  if (match) {
+    return `${match[1]}・${match[2]}`;
+  }
+
+  // 文字列の途中にパターンが埋もれている場合も拾う
+  match = normalized.match(/([ABC])・?([12])/);
+  if (match) {
+    return `${match[1]}・${match[2]}`;
+  }
+
+  return '';
+}
+
+/**
+ * JSONにpatternが無い場合、レスポンステキスト全体から推測する
+ * @param {any} rawPattern
+ * @param {string} responseText
+ * @param {number} rowIndex
+ * @returns {string}
+ */
+function resolvePatternIdentifier(rawPattern, responseText, rowIndex) {
+  const normalizedFromJson = normalizePattern(rawPattern);
+  if (normalizedFromJson) return normalizedFromJson;
+
+  const fallback = normalizePattern(responseText);
+  if (fallback) {
+    Logger.log(`Row ${rowIndex}: JSONにpatternが無かったため、テキストから「${fallback}」を補完しました。`);
+    return fallback;
+  }
+
+  Logger.log(`Row ${rowIndex}: パターン識別子を抽出できませんでした。`);
+  return '';
 }
