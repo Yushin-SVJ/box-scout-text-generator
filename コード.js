@@ -35,13 +35,23 @@ function generateScoutMails() {
   for (let i = 0; i < values.length; i++) {
     if (processed >= MAX_PER_RUN) break;
 
-    const rowIndex = i + 2; // シート上の行番号
-    const [companyName, companyInfo, subject, body, status, patternCode] = values[i];
+    const rowIndex = i + 2;
+    let [companyName, companyInfo, subject, body, status, patternCode] = values[i];
 
-    // 企業名なし or 既にdone or 件名/本文が埋まっている → スキップ
     if (!companyName) continue;
     if (status === 'done') continue;
     if (subject && body) continue;
+
+    // evaluateCompanyInfoReadiness の呼び出しを削除
+    // 代わりに enrichCompanyInfoViaGemini で常に情報を補完
+    const enrichedInfo = enrichCompanyInfoViaGemini(String(companyName), String(companyInfo || ''));
+    if (enrichedInfo && enrichedInfo !== companyInfo) {
+      companyInfo = enrichedInfo;
+      // シートには書き込まない（API呼び出しを減らす場合）
+      // または書き込む場合は以下をコメント解除：
+      // sheet.getRange(rowIndex, 2).setValue(enrichedInfo);
+      Logger.log(`Row ${rowIndex}: 企業情報を補完しました`);
+    }
 
     const prompt = buildPromptForCompany(companyName, companyInfo);
     const responseText = callGemini(prompt);
@@ -417,4 +427,41 @@ function resolvePatternIdentifier(rawPattern, responseText, rowIndex) {
 
   Logger.log(`Row ${rowIndex}: パターン識別子を抽出できませんでした。`);
   return '';
+}
+
+/**
+ * 企業情報を Gemini で補完（質を向上させる）
+ * - 既存情報が薄い場合のみ実行
+ */
+function enrichCompanyInfoViaGemini(companyName, currentInfo) {
+  // 既に具体的なキーワードが含まれていればスキップ（API節約）
+  const hasConcreteInfo = /(シリーズ[A-Z]|資金調達|ARR|売上|上場|IPO|創業\d{4}|社員数\d+|年収\d+)/.test(currentInfo);
+  if (hasConcreteInfo && currentInfo.length >= 300) {
+    return currentInfo;
+  }
+
+  const enrichPrompt = `
+以下の企業について、公開情報を基に情報を補完してください。
+
+【企業名】${companyName}
+
+【現在の情報】
+${currentInfo || '（情報なし）'}
+
+【出力（JSON のみ）】
+{
+  "enriched_info": "以下を含む補完情報（500字以内）:\n- 事業内容\n- 資金調達・成長段階（分かれば）\n- 求める職種・スキル・人材像"
+}
+
+【厳守】捏造禁止。不明なら「〜と推測されます」と記載。JSON以外は出力しない。
+`.trim();
+
+  const responseText = callGemini(enrichPrompt);
+  if (!responseText) return currentInfo;
+
+  const json = parseResultJson(responseText);
+  if (!json || !json.enriched_info) return currentInfo;
+
+  // 元の情報 + 補完情報を結合して返す
+  return `${currentInfo}\n\n【補完情報】\n${json.enriched_info}`.trim();
 }
