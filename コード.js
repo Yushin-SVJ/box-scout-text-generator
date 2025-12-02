@@ -3,7 +3,7 @@ const SHEET_NAME = 'シート1'; // シート名
 const MAX_PER_RUN = 10;         // 1回の実行で処理する最大件数
 
 // 使用するGeminiモデル
-const GEMINI_MODEL = 'gemini-2.5-pro';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
@@ -26,31 +26,23 @@ function generateScoutMails() {
     return;
   }
 
-  // A〜F列をまとめて取得
   const values = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
-  // [A:企業名, B:企業情報, C:件名, D:本文, E:ステータス, F:使用パターン]
-
   let processed = 0;
 
   for (let i = 0; i < values.length; i++) {
     if (processed >= MAX_PER_RUN) break;
 
     const rowIndex = i + 2;
-    let [companyName, companyInfo, subject, body, status, patternCode] = values[i];
+    const [companyName, , subject, body, status] = values[i];
 
     if (!companyName) continue;
     if (status === 'done') continue;
     if (subject && body) continue;
 
-    // evaluateCompanyInfoReadiness の呼び出しを削除
-    // 代わりに enrichCompanyInfoViaGemini で常に情報を補完
-    const enrichedInfo = enrichCompanyInfoViaGemini(String(companyName), String(companyInfo || ''));
-    if (enrichedInfo && enrichedInfo !== companyInfo) {
-      companyInfo = enrichedInfo;
-      // シートには書き込まない（API呼び出しを減らす場合）
-      // または書き込む場合は以下をコメント解除：
-      // sheet.getRange(rowIndex, 2).setValue(enrichedInfo);
-      Logger.log(`Row ${rowIndex}: 企業情報を補完しました`);
+    const companyInfo = fetchCompanyProfile(String(companyName).trim());
+    if (!companyInfo) {
+      Logger.log(`Row ${rowIndex}: 企業情報を取得できませんでした（${companyName}）。`);
+      continue;
     }
 
     const prompt = buildPromptForCompany(companyName, companyInfo);
@@ -66,14 +58,12 @@ function generateScoutMails() {
       continue;
     }
 
-    // --- 追加: モデルが返した「選択理由」をログに出す（デバッグ用） ---
     let patternReason = '';
     if (json.pattern_reason && String(json.pattern_reason).trim()) {
       patternReason = String(json.pattern_reason).trim();
     } else if (json.reason && String(json.reason).trim()) {
       patternReason = String(json.reason).trim();
     } else {
-      // テキスト中の「理由: ○○」を抽出（改行2つ以上または末尾までを対象）
       const m = responseText.match(/理由[:：]\s*([\s\S]*?)(?:\n\s*\n|$)/);
       if (m && m[1]) patternReason = m[1].trim();
     }
@@ -82,19 +72,17 @@ function generateScoutMails() {
     } else {
       Logger.log(`Row ${rowIndex}: モデルの選択理由は出力されていませんでした。`);
     }
-    // --- ここまで追加 ---
-    
+
     const outCompany = json.company_name || companyName;
     const outSubject = json.subject || '';
     const outBody = json.body || '';
     const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
 
-    // シートに書き込み
-    sheet.getRange(rowIndex, 1).setValue(outCompany); // A:企業名（整形されれば上書き）
-    sheet.getRange(rowIndex, 3).setValue(outSubject); // C:件名
-    sheet.getRange(rowIndex, 4).setValue(outBody);    // D:本文
-    sheet.getRange(rowIndex, 5).setValue('done');     // E:ステータス
-    sheet.getRange(rowIndex, 6).setValue(outPattern); // F:使用パターン（例: A・2）
+    sheet.getRange(rowIndex, 1).setValue(outCompany);
+    sheet.getRange(rowIndex, 3).setValue(outSubject);
+    sheet.getRange(rowIndex, 4).setValue(outBody);
+    sheet.getRange(rowIndex, 5).setValue('done');
+    sheet.getRange(rowIndex, 6).setValue(outPattern);
 
     processed++;
   }
@@ -469,4 +457,55 @@ ${currentInfo || '（情報なし）'}
 
   // 元の情報 + 補完情報を結合して返す
   return `${currentInfo}\n\n【補完情報】\n${json.enriched_info}`.trim();
+}
+
+/**
+ * 企業情報を Gemini から取得して整形する
+ * @param {string} companyName
+ * @returns {string}
+ */
+function fetchCompanyProfile(companyName) {
+  if (!companyName) return '';
+
+  const profilePrompt = `
+あなたは企業リサーチャーです。以下の企業について公開情報をもとに要約してください。
+
+【企業名】
+${companyName}
+
+【出力（JSONのみ）】
+{
+  "business": "事業概要（150字以内）",
+  "phase": "事業フェーズ・資金調達状況など（100字以内）",
+  "roles": "募集している/相性が良いと想定される職種・ロール（100字以内）",
+  "skills": "求めるスキル・価値観・カルチャーフィット（120字以内）",
+  "proof_points": [
+    "補強できる定量・エピソード（任意、1文）",
+    "..."
+  ]
+}
+
+【厳守】
+- 公開情報のみ。推測は「〜と推測されます」と明記。
+- JSON以外のテキストを出力しない。
+`.trim();
+
+  const responseText = callGemini(profilePrompt);
+  if (!responseText) return '';
+
+  const json = parseResultJson(responseText);
+  if (!json) return '';
+
+  const segments = [];
+  if (json.business) segments.push(`【事業】${json.business}`);
+  if (json.phase) segments.push(`【フェーズ】${json.phase}`);
+  if (json.roles) segments.push(`【想定ポジション】${json.roles}`);
+  if (json.skills) segments.push(`【求める人物像】${json.skills}`);
+
+  if (Array.isArray(json.proof_points) && json.proof_points.length) {
+    const proof = json.proof_points.filter(Boolean).map((p, idx) => `・${idx + 1}. ${p}`).join('\n');
+    if (proof) segments.push(`【補足エピソード】\n${proof}`);
+  }
+
+  return segments.join('\n\n').trim();
 }
