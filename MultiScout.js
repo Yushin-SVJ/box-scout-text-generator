@@ -2,6 +2,8 @@
 /**
  * 複数社スカウト生成機能 (MultiScout.js)
  * 既存の `コード.js` とは独立して動作するが、`callGemini` などの共通関数は利用する。
+ * 
+ * Update: ヘッダー位置変更に対応するため、列指定を動的に変更
  */
 
 // 定数定義
@@ -9,7 +11,7 @@ const MULTI_SHEET_NAME = '複数社検討シート';
 const SOURCE_SHEET_NAME = 'シート1';
 const MULTI_MAX_PER_RUN = 5; // 1回の実行で処理する最大件数
 
-// コード.js にある FIXED_FOOTER を複製（既存ファイルを変更しないため）
+// コード.js にある FIXED_FOOTER を複製
 const FIXED_FOOTER_MULTI = `
   ▼ 私が提供できる価値
 
@@ -118,48 +120,100 @@ C：要点直球型（短く刺す方が有効な場合）
 
 
 /**
+ * ヘッダー名から列番号（1-based）を取得するヘルパー関数
+ * @param {Sheet} sheet
+ * @param {string} headerName
+ * @returns {number} 1-based index (見つからない場合は -1)
+ */
+function getColumnIndex(sheet, headerName) {
+    const lastCol = sheet.getLastColumn();
+    if (lastCol < 1) return -1;
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    const index = headers.indexOf(headerName);
+    return index === -1 ? -1 : index + 1;
+}
+
+/**
+ * 列インデックスが見つからない場合にエラーを投げるラップ関数
+ */
+function getRequiredColumnIndex(sheet, headerName) {
+    const idx = getColumnIndex(sheet, headerName);
+    if (idx === -1) {
+        throw new Error(`シート「${sheet.getName()}」にヘッダー「${headerName}」が見つかりません。`);
+    }
+    return idx;
+}
+
+
+/**
  * 1. transferSingleScoutData()
- * 「シート1」から最新の単社データを取得し、「複数社検討シート」の参照列（H〜K列）を更新する。
+ * 「シート1」から最新の単社データを取得し、「複数社検討シート」の参照列を更新する。
  */
 function transferSingleScoutData() {
     const ss = SpreadsheetApp.getActive();
 
+    // ------------------------------
     // 1. ソースデータの読み込み
+    // ------------------------------
     const sourceSheet = ss.getSheetByName(SOURCE_SHEET_NAME);
     if (!sourceSheet) {
         Logger.log(`シート「${SOURCE_SHEET_NAME}」が見つかりません。`);
         return;
     }
+
+    // ソース側の列特定 (企業名, 本文, パターン)
+    // ※もしシート1のヘッダー名が固定でないならここも修正が必要だが、
+    //   一般的にコード.jsと合わせるため、既存カラム名「企業名」「本文」「パターン」を想定
+    //   見つからない場合は従来の固定列(A=1, D=4, F=6)にフォールバックする安全策をとる
+    let srcIdxName = getColumnIndex(sourceSheet, '企業名');
+    let srcIdxBody = getColumnIndex(sourceSheet, '本文'); // または 'スカウト本文'
+    let srcIdxPattern = getColumnIndex(sourceSheet, 'パターン');
+
+    // フォールバック
+    if (srcIdxName === -1) srcIdxName = 1; // A
+    if (srcIdxBody === -1) srcIdxBody = 4; // D
+    if (srcIdxPattern === -1) srcIdxPattern = 6; // F
+
+    Logger.log(`Source Columns - Name:${srcIdxName}, Body:${srcIdxBody}, Pattern:${srcIdxPattern}`);
+
     const sourceLastRow = sourceSheet.getLastRow();
     if (sourceLastRow < 2) {
         Logger.log('参照元のデータがありません。');
         return;
     }
 
-    // A列:企業名, B列:URL(未使用), C列:件名(未使用), D列:本文, E列:ステータス(未使用), F列:パターン
-    // getRange(row, col, numRows, numCols) -> A2:F(lastRow)
-    const sourceValues = sourceSheet.getRange(2, 1, sourceLastRow - 1, 6).getValues();
+    // 全データ取得 (行ごとに処理)
+    const sourceC = sourceSheet.getLastColumn();
+    const sourceValues = sourceSheet.getRange(2, 1, sourceLastRow - 1, sourceC).getValues();
 
     // Map化 (Key: 企業名 -> Value: { body, pattern })
     const companyMap = new Map();
     for (const row of sourceValues) {
-        const name = String(row[0]).trim();
+        const name = String(row[srcIdxName - 1]).trim(); // 0-based
         if (!name) continue;
 
-        // 最新の行を優先するか、最初の行を優先するか。ここでは「上書き」＝下の行（より新しい行と仮定）が残るようにする
-        // 必要であれば逆順ループにするなどの調整が可能
         companyMap.set(name, {
-            body: row[3],      // D列
-            pattern: row[5]    // F列
+            body: row[srcIdxBody - 1],
+            pattern: row[srcIdxPattern - 1]
         });
     }
 
+    // ------------------------------
     // 2. ターゲットシートの読み込み
+    // ------------------------------
     const targetSheet = ss.getSheetByName(MULTI_SHEET_NAME);
     if (!targetSheet) {
-        Logger.log(`シート「${MULTI_SHEET_NAME}」が見つかりません。作成してください。`);
+        Logger.log(`シート「${MULTI_SHEET_NAME}」が見つかりません。`);
         return;
     }
+
+    // 必要な列インデックスを取得
+    const colName1 = getRequiredColumnIndex(targetSheet, '企業名1');
+    const colName2 = getRequiredColumnIndex(targetSheet, '企業名2');
+    const colRefBody1 = getRequiredColumnIndex(targetSheet, '[参照] 企業名1本文');
+    const colRefBody2 = getRequiredColumnIndex(targetSheet, '[参照] 企業名2本文');
+    const colRefPat1 = getRequiredColumnIndex(targetSheet, '[参照] 企業名1パターン');
+    const colRefPat2 = getRequiredColumnIndex(targetSheet, '[参照] 企業名2パターン');
 
     const targetLastRow = targetSheet.getLastRow();
     if (targetLastRow < 2) {
@@ -167,32 +221,51 @@ function transferSingleScoutData() {
         return;
     }
 
-    // A列(企業名1), B列(企業名2) を取得
-    const targetRange = targetSheet.getRange(2, 1, targetLastRow - 1, 2);
+    // 全列読み込み
+    const targetMaxCol = targetSheet.getLastColumn();
+    const targetRange = targetSheet.getRange(2, 1, targetLastRow - 1, targetMaxCol);
     const targetValues = targetRange.getValues();
 
-    // 書き込み用配列の準備 (H, I, J, K 列用) -> 4カラム
-    const updates = [];
+    // 書き込み内容を保持する配列 (行番号 -> { col: val, ... }) の代わりに
+    // 効率化のため getValuesで取った配列を直接書き換えて setValues するか、
+    // update用の配列を用意して setValues する。
+    // ここでは更新対象のカラムが飛び飛びになる可能性があるため、API呼び出し回数を減らす工夫が必要。
+    // しかし GAS setValues は矩形範囲が必要。
+    // 「参照列」は H〜K のように連続していると想定されるが、動的カラム対応なので連続とは限らない。
+    // 安全のため、行ごとに更新データを準備して、最後にまとめて...は難しい（列が散らばる）。
+    // したがって、書き込みは「参照データブロック」が連続していると期待しつつ、
+    // ここでは実装の単純さと堅牢性を優先し、
+    // setValues用配列を「全行 × 全列」用意して、必要な箇所だけ上書きし、最後にドカンと書き込むのがベストだが、
+    // シートの他のデータ（生成済み本文など）を上書きして消してしまうリスクがある。
+    // → 結論: update用の配列を作成し、列ごとにまとめて書き込む。
+
+    const updatesRefBody1 = [];
+    const updatesRefBody2 = [];
+    const updatesRefPat1 = [];
+    const updatesRefPat2 = [];
 
     for (let i = 0; i < targetValues.length; i++) {
-        const name1 = String(targetValues[i][0]).trim();
-        const name2 = String(targetValues[i][1]).trim();
+        const row = targetValues[i];
+        const name1 = String(row[colName1 - 1]).trim();
+        const name2 = String(row[colName2 - 1]).trim();
 
         const info1 = companyMap.get(name1) || { body: '', pattern: '' };
         const info2 = companyMap.get(name2) || { body: '', pattern: '' };
 
-        updates.push([
-            info1.body,    // H: 企業名1本文
-            info2.body,    // I: 企業名2本文
-            info1.pattern, // J: 企業名1パターン
-            info2.pattern  // K: 企業名2パターン
-        ]);
+        updatesRefBody1.push([info1.body]);
+        updatesRefBody2.push([info2.body]);
+        updatesRefPat1.push([info1.pattern]);
+        updatesRefPat2.push([info2.pattern]);
     }
 
-    // 3. 一括書き込み (H2:K(lastRow))
-    if (updates.length > 0) {
-        targetSheet.getRange(2, 8, updates.length, 4).setValues(updates);
-        Logger.log(`参照データ転記完了: ${updates.length} 件`);
+    // 列ごとに一括書き込み
+    if (targetValues.length > 0) {
+        targetSheet.getRange(2, colRefBody1, targetValues.length, 1).setValues(updatesRefBody1);
+        targetSheet.getRange(2, colRefBody2, targetValues.length, 1).setValues(updatesRefBody2);
+        targetSheet.getRange(2, colRefPat1, targetValues.length, 1).setValues(updatesRefPat1);
+        targetSheet.getRange(2, colRefPat2, targetValues.length, 1).setValues(updatesRefPat2);
+
+        Logger.log(`参照データ転記完了: ${targetValues.length} 件`);
     }
 }
 
@@ -204,19 +277,34 @@ function transferSingleScoutData() {
 function generateMultiScoutMails() {
     const ss = SpreadsheetApp.getActive();
 
-    // まず参照データを最新化
+    // 転記実行
     transferSingleScoutData();
 
     const sheet = ss.getSheetByName(MULTI_SHEET_NAME);
-    if (!sheet) return; // transferSingleScoutDataでログ出力済み
+    if (!sheet) return;
+
+    // 列位置特定
+    const colName1 = getRequiredColumnIndex(sheet, '企業名1');
+    const colName2 = getRequiredColumnIndex(sheet, '企業名2');
+    const colStatus = getRequiredColumnIndex(sheet, 'ステータス');
+    const colErr = getRequiredColumnIndex(sheet, '[エラー] エラー理由');
+
+    // 参照データ列
+    const colRefBody1 = getRequiredColumnIndex(sheet, '[参照] 企業名1本文');
+    const colRefBody2 = getRequiredColumnIndex(sheet, '[参照] 企業名2本文');
+
+    // 出力先列
+    const colOutSubject = getRequiredColumnIndex(sheet, '【生成】複合版件名');
+    const colOutBody = getRequiredColumnIndex(sheet, '【生成】複合版本文');
+    const colOutPattern = getRequiredColumnIndex(sheet, '【生成】複合版パターン');
+    const colOutReason = getRequiredColumnIndex(sheet, '【生成】選定理由');
 
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return;
 
-    // 読み込み範囲: A列〜K列 (11カラム)
-    // A:企業1, B:企業2, C:件名, D:本文, E:パターン, F:理由, G:ステータス, H:本1, I:本2, J:パ1, K:パ2
-    const dataRange = sheet.getRange(2, 1, lastRow - 1, 11);
-    const values = dataRange.getValues();
+    // 全データ取得
+    const maxCol = sheet.getLastColumn();
+    const values = sheet.getRange(2, 1, lastRow - 1, maxCol).getValues();
 
     let processedCount = 0;
 
@@ -226,21 +314,21 @@ function generateMultiScoutMails() {
         const row = values[i];
         const rowIndex = i + 2;
 
-        const company1 = row[0];
-        const company2 = row[1];
-        const status = row[6];
-        const body1 = row[7]; // H列
-        const body2 = row[8]; // I列
-
-        // 処理条件: ステータスが 'done' でない、かつ 企業名が両方ある
+        const status = String(row[colStatus - 1]); // 0-based
         if (status === 'done') continue;
+
+        const company1 = row[colName1 - 1];
+        const company2 = row[colName2 - 1];
+
         if (!company1 || !company2) continue;
 
-        // 参照データチェック
+        const body1 = row[colRefBody1 - 1];
+        const body2 = row[colRefBody2 - 1];
+
         if (!body1 || !body2) {
             const msg = `単社情報不足のためスキップ: ${company1}, ${company2}`;
             Logger.log(`Row ${rowIndex}: ${msg}`);
-            sheet.getRange(rowIndex, 12).setValue(msg); // L列にエラー出力
+            sheet.getRange(rowIndex, colErr).setValue(msg);
             continue;
         }
 
@@ -250,43 +338,39 @@ function generateMultiScoutMails() {
             .replace('{companyB_Name}', company2)
             .replace('${companyA_Body}', body1)
             .replace('${companyB_Body}', body2)
-            .replace('${FIXED_FOOTER}', FIXED_FOOTER_MULTI); // フッター埋め込み
+            .replace('${FIXED_FOOTER}', FIXED_FOOTER_MULTI);
 
-        // 既存コードの callGemini を呼び出し
-        // ※コード.js が同じプロジェクトにある前提
         Logger.log(`Row ${rowIndex}: Gemini 生成開始...`);
         const responseText = callGemini(prompt);
 
         if (!responseText) {
             Logger.log(`Row ${rowIndex}: Geminiレスポンスなし`);
-            sheet.getRange(rowIndex, 12).setValue('Gemini API Error');
+            sheet.getRange(rowIndex, colErr).setValue('Gemini API Error');
             continue;
         }
 
-        // JSONパース (既存コードの parseResultJson を利用)
         const json = parseResultJson(responseText);
         if (!json) {
             Logger.log(`Row ${rowIndex}: JSONパース失敗`);
-            sheet.getRange(rowIndex, 12).setValue('JSON Parse Error');
+            sheet.getRange(rowIndex, colErr).setValue('JSON Parse Error');
             continue;
         }
 
-        // 書き込み
-        // C:件名, D:本文, E:パターン, F:選定理由, G:ステータス
-        sheet.getRange(rowIndex, 3).setValue(json.subject || '');
-        sheet.getRange(rowIndex, 4).setValue(json.body || '');
-        sheet.getRange(rowIndex, 5).setValue(json.pattern || '');
-        sheet.getRange(rowIndex, 6).setValue(json.pattern_reason || '');
-        sheet.getRange(rowIndex, 7).setValue('done');
-        sheet.getRange(rowIndex, 12).clearContent(); // エラー列クリア
+        // 結果書き込み (セル単位で書き込む)
+        sheet.getRange(rowIndex, colOutSubject).setValue(json.subject || '');
+        sheet.getRange(rowIndex, colOutBody).setValue(json.body || '');
+        sheet.getRange(rowIndex, colOutPattern).setValue(json.pattern || '');
+        sheet.getRange(rowIndex, colOutReason).setValue(json.pattern_reason || '');
+        sheet.getRange(rowIndex, colStatus).setValue('done');
+        sheet.getRange(rowIndex, colErr).clearContent();
 
         processedCount++;
         Logger.log(`Row ${rowIndex}: 生成完了`);
     }
 
-    if (processedCount === 0) {
-        Logger.log('処理対象がありませんでした（すべて完了済み or データ不足）。');
-    } else {
+    if (processedCount > 0) {
         Logger.log(`完了: ${processedCount} 件`);
+    } else {
+        Logger.log('処理対象がありませんでした。');
     }
 }
