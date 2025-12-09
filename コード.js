@@ -15,88 +15,93 @@ const GEMINI_ENDPOINT =
  */
 function generateScoutMails() {
   const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) {
-    throw new Error(`シート「${SHEET_NAME}」が見つかりません。`);
+  try {
+    const sheet = ss.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      throw new Error(`シート「${SHEET_NAME}」が見つかりません。`);
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      Logger.log('データ行がありません。');
+      return;
+    }
+
+    const values = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+    let processed = 0;
+    let recentPatterns = []; // 直近のパターンを記録（多様性確保用）
+
+    for (let i = 0; i < values.length; i++) {
+      if (processed >= MAX_PER_RUN) break;
+
+      const rowIndex = i + 2;
+      const [companyName, , subject, body, status] = values[i];
+
+      if (!companyName) continue;
+      if (status === 'done') continue;
+      if (subject && body) continue;
+
+      const companyInfo = fetchCompanyProfile(String(companyName).trim());
+      if (!companyInfo) {
+        Logger.log(`Row ${rowIndex}: 企業情報を取得できませんでした（${companyName}）。`);
+        continue;
+      }
+
+      // 直近2件のパターンを渡して多様性を確保
+      const prompt = buildPromptForCompany(companyName, companyInfo, recentPatterns);
+      const responseText = callGemini(prompt);
+      if (!responseText) {
+        Logger.log(`Row ${rowIndex}: Geminiからレスポンスが得られませんでした。`);
+        continue;
+      }
+
+      const json = parseResultJson(responseText);
+      if (!json) {
+        Logger.log(`Row ${rowIndex}: JSON抽出/パースに失敗しました: ${responseText}`);
+        continue;
+      }
+
+      let patternReason = '';
+      if (json.pattern_reason && String(json.pattern_reason).trim()) {
+        patternReason = String(json.pattern_reason).trim();
+      } else if (json.reason && String(json.reason).trim()) {
+        patternReason = String(json.reason).trim();
+      } else {
+        const m = responseText.match(/理由[:：]\s*([\s\S]*?)(?:\n\s*\n|$)/);
+        if (m && m[1]) patternReason = m[1].trim();
+      }
+      if (patternReason) {
+        Logger.log(`Row ${rowIndex}: モデルの選択理由: ${patternReason}`);
+      } else {
+        Logger.log(`Row ${rowIndex}: モデルの選択理由は出力されていませんでした。`);
+      }
+
+      const outCompany = json.company_name || companyName;
+      const outSubject = json.subject || '';
+      const outBody = json.body || '';
+      const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
+
+      // 直近パターンを更新（多様性確保用）
+      if (outPattern) {
+        const structureOnly = outPattern.charAt(0); // A, B, C のみ抽出
+        recentPatterns.push(structureOnly);
+        if (recentPatterns.length > 2) recentPatterns.shift(); // 直近2件のみ保持
+      }
+
+      sheet.getRange(rowIndex, 1).setValue(outCompany);
+      sheet.getRange(rowIndex, 3).setValue(outSubject);
+      sheet.getRange(rowIndex, 4).setValue(outBody);
+      sheet.getRange(rowIndex, 5).setValue('done');
+      sheet.getRange(rowIndex, 6).setValue(outPattern);
+
+      processed++;
+    }
+
+    Logger.log(`処理完了：${processed} 件を更新しました。`);
+  } catch (e) {
+    Logger.log(e.stack);
+    SpreadsheetApp.getUi().alert(`エラーが発生しました: ${e.message}`);
   }
-
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) {
-    Logger.log('データ行がありません。');
-    return;
-  }
-
-  const values = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
-  let processed = 0;
-  let recentPatterns = []; // 直近のパターンを記録（多様性確保用）
-
-  for (let i = 0; i < values.length; i++) {
-    if (processed >= MAX_PER_RUN) break;
-
-    const rowIndex = i + 2;
-    const [companyName, , subject, body, status] = values[i];
-
-    if (!companyName) continue;
-    if (status === 'done') continue;
-    if (subject && body) continue;
-
-    const companyInfo = fetchCompanyProfile(String(companyName).trim());
-    if (!companyInfo) {
-      Logger.log(`Row ${rowIndex}: 企業情報を取得できませんでした（${companyName}）。`);
-      continue;
-    }
-
-    // 直近2件のパターンを渡して多様性を確保
-    const prompt = buildPromptForCompany(companyName, companyInfo, recentPatterns);
-    const responseText = callGemini(prompt);
-    if (!responseText) {
-      Logger.log(`Row ${rowIndex}: Geminiからレスポンスが得られませんでした。`);
-      continue;
-    }
-
-    const json = parseResultJson(responseText);
-    if (!json) {
-      Logger.log(`Row ${rowIndex}: JSON抽出/パースに失敗しました: ${responseText}`);
-      continue;
-    }
-
-    let patternReason = '';
-    if (json.pattern_reason && String(json.pattern_reason).trim()) {
-      patternReason = String(json.pattern_reason).trim();
-    } else if (json.reason && String(json.reason).trim()) {
-      patternReason = String(json.reason).trim();
-    } else {
-      const m = responseText.match(/理由[:：]\s*([\s\S]*?)(?:\n\s*\n|$)/);
-      if (m && m[1]) patternReason = m[1].trim();
-    }
-    if (patternReason) {
-      Logger.log(`Row ${rowIndex}: モデルの選択理由: ${patternReason}`);
-    } else {
-      Logger.log(`Row ${rowIndex}: モデルの選択理由は出力されていませんでした。`);
-    }
-
-    const outCompany = json.company_name || companyName;
-    const outSubject = json.subject || '';
-    const outBody = json.body || '';
-    const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
-
-    // 直近パターンを更新（多様性確保用）
-    if (outPattern) {
-      const structureOnly = outPattern.charAt(0); // A, B, C のみ抽出
-      recentPatterns.push(structureOnly);
-      if (recentPatterns.length > 2) recentPatterns.shift(); // 直近2件のみ保持
-    }
-
-    sheet.getRange(rowIndex, 1).setValue(outCompany);
-    sheet.getRange(rowIndex, 3).setValue(outSubject);
-    sheet.getRange(rowIndex, 4).setValue(outBody);
-    sheet.getRange(rowIndex, 5).setValue('done');
-    sheet.getRange(rowIndex, 6).setValue(outPattern);
-
-    processed++;
-  }
-
-  Logger.log(`処理完了：${processed} 件を更新しました。`);
 }
 
 /**

@@ -78,6 +78,20 @@ const MULTI_SCOUT_PROMPT = `
 - SaaS特有の用語（ARR、MRR など）や、特定業界の常識を前提にした表現は、入力文に明記されている場合を除き使用しないでください。
 - 業界ラベルではなく、「どのような事業フェーズか」「どのようなスキルが伸びる環境か」など、キャリア軸・フェーズ軸で表現してください。
 ------------------------------------------------
+【文章表現に関する禁止事項と代替案】
+企業情報に載っている場合を除いて、以下の表現は使用せず、右側の代替案や、より自然な文脈に書き換えてください。
+- 貴殿　　　→ {相手の名前}様
+- 極めて　　→ 非常に / とても
+- まさに　　→ （削除する） / ～のような / ～そのもの
+- 確信した　→ 感じております / 考えております
+- 最適　　　→ マッチする / 親和性が高い
+- 強く惹かれ → 大変興味を持ち / 魅力を感じ
+- 不可欠　　→ 重要 / カギとなる
+- 稀有な　　→ 貴重な / ユニークな
+- 最高　　　→ 素晴らしい / 非常に魅力的な
+- 具体的職種・部署名禁止（配属リスク回避）
+- 推測での断言禁止（デカコーンに成長中！ など）
+------------------------------------------------
 【入力として与えられるもの】
 ユーザーから、2社分についてそれぞれ以下が与えられます。
 - 企業名
@@ -144,14 +158,15 @@ const MULTI_SCOUT_PROMPT = `
 
 【固定フッター】
 本文の最後には、次のフッターをそのまま挿入してください（改変禁止・{担当者名}もそのまま出力）:
-▼ 私が提供できる価値
-${FIXED_FOOTER}
+
+${FIXED_FOOTER_MULTI}
+
 【対象企業情報】
 ■1社目：{companyA_Name}
-${companyA_Body}
+{companyA_Body}
 
 ■2社目：{companyB_Name}
-${companyB_Body}
+{companyB_Body}
 `.trim();
 
 
@@ -421,9 +436,8 @@ function generateMultiScoutMails() {
         let prompt = MULTI_SCOUT_PROMPT
             .replace('{companyA_Name}', company1)
             .replace('{companyB_Name}', company2)
-            .replace('${companyA_Body}', body1)
-            .replace('${companyB_Body}', body2)
-            .replace('${FIXED_FOOTER}', FIXED_FOOTER_MULTI);
+            .replace('{companyA_Body}', body1)
+            .replace('{companyB_Body}', body2);
 
         Logger.log(`Row ${rowIndex}: Gemini 生成開始...`);
         // コード.jsの callGemini は変更せずそのまま使う
