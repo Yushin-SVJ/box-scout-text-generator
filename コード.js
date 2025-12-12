@@ -7,6 +7,7 @@ const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
+// 固定フッター（本文末尾にコード側で付与する）
 /**
  * メイン関数：
  * - シートのA,B列を読み取り
@@ -78,7 +79,8 @@ function generateScoutMails() {
 
       const outCompany = json.company_name || companyName;
       const outSubject = json.subject || '';
-      const outBody = json.body || '';
+      const bodyMain = json.body_main || json.body || '';
+      const outBody = bodyMain ? `${bodyMain}\n\n${FIXED_FOOTER}` : FIXED_FOOTER;
       const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
 
       // 直近パターンを更新（多様性確保用）
@@ -127,54 +129,6 @@ function buildPromptForCompany(companyName, companyInfo, recentPatterns = []) {
 pattern_reason に「多様性確保のため」と明記すること。
 `;
   }
-
-  const FIXED_FOOTER = `
-  ▼ 私が提供できる価値
-
-コロナ禍明けから選考ハードルが高い状態ですが、直近3ヶ月で書類通過率84％（※転職平均30％）を実現しており、72％の方が内定獲得しています。
-
-その要因としては、下記の2点がございます。
-
-【1】企業別の面接対策を行い、希望者に合計10回以上の徹底的な言語化のサポート
-　┗※過去の面接データや非公開情報を元に対策し、年収アップの転職を実現しています。
-
-【2】会計事務所として関わり、経営陣との距離感がかなり近いため口添えできる
-　┗※本来は書類見送りの方も、弊社の紹介であれば選考を通して頂いております。
-
-■■■■■■■■■■■■■■■■■■■
-▽その他ご提案先の一部をご紹介します▽
-マネーフォワード / kubell / ユーザベース
-LegalForce / SATORI / オープンエイト
-カミナシ / Sales Marker / プレイド
-アンドパッド / LayerX / ヤプリ / スタディスト / freee
-ビットキー / BASE / ROXX / プレックス
-dely / ポジウィル / フェズ
-スマートニュース / ビズリーチ
-Speee / メルカリ / レバレジーズ
-
-◆直近の私の支援実績 ※一部のみ抜粋◆
-------------------------------
-(1) 30歳 / 男性 / Sier（年収590万円）
-　┗▶︎ 大手SaaS / FS（年収700万円）
-(2) 32歳 / 女性 / 未上場SaaS（年収540万円）
-　┗▶︎ 上場SaaS / CS（年収640万円）
-(3) 33歳 / 女性 / 大手百貨店マネージャー（年収480万円）
-　┗▶︎ 大手人材系 / 新規事業部 / 法人営業（年収500万円）
-(4) 35歳 / 女性 / 大手メディア / 営業マネージャー（年収900万円）
-　┗▶︎ 上場SaaS / 営業マネージャー（年収1,000万円）
-
-◆面談について◆
-・面談手法：全てWEB完結です
-・所要時間：30分程度
-週によっては土日祝もご対応可能です。
-
-//////////////////////////////////////////////
-株式会社BOX
-採用支援事業部マネージャー
-{担当者名}
-〒150-0031 東京都渋谷区桜丘町9－8 ＫＮ渋谷3ビル 2F
-//////////////////////////////////////////////
-`.trim();
 
   const prompt = `
 あなたは、人材紹介会社「株式会社BOX」のスカウト文面作成パートナーです。
@@ -329,9 +283,7 @@ ${diversityRule}
 
 -------------------------------------
 【本文の最後】
-以下の固定フッターを必ず「そのまま」挿入する（改変禁止・{担当者名}もそのまま出力）：
-
-${FIXED_FOOTER}
+本文にはフッターを含めないでください（コード側で固定フッターを後付けします）。本文だけを返してください。
 
 -------------------------------------
 【出力フォーマット（厳守）】
@@ -341,7 +293,7 @@ ${FIXED_FOOTER}
 {
   "company_name": "企業名をここに", 
   "subject": "ここにメール件名を1つ",
-  "body": "ここに本文全体",
+  "body_main": "ここに本文（固定フッターを含めない）",
   "pattern": "例: B・1",
   "pattern_reason": "選択した理由を簡潔に1文で（知名度・ターゲット層・フェーズなどの根拠を含める）"
 }
@@ -360,13 +312,18 @@ ${infoText}
 /**
  * Gemini APIを呼び出す
  * @param {string} prompt
+ * @param {string} [modelName] - 使用するモデル名（省略時は GEMINI_MODEL 定数を使用）
  * @returns {string|null} モデルの生テキストレスポンス
  */
-function callGemini(prompt) {
+function callGemini(prompt, modelName) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY がスクリプトプロパティに設定されていません。');
   }
+
+  // モデル名が指定されていればそれを、なければ定数(GEMINI_MODEL)を使用
+  const useModel = modelName || GEMINI_MODEL;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${useModel}:generateContent`;
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -387,12 +344,12 @@ function callGemini(prompt) {
     muteHttpExceptions: true,
   };
 
-  const res = UrlFetchApp.fetch(GEMINI_ENDPOINT, options);
+  const res = UrlFetchApp.fetch(endpoint, options);
   const code = res.getResponseCode();
   const text = res.getContentText();
 
   if (code !== 200) {
-    Logger.log('Gemini API error: ' + code + ' ' + text);
+    Logger.log(`Gemini API error (Model: ${useModel}): ` + code + ' ' + text);
     return null;
   }
 

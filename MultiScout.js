@@ -1,16 +1,18 @@
-
 /**
  * 複数社スカウト生成機能 (MultiScout.js)
  * 既存の `コード.js` とは独立して動作するが、`callGemini` などの共通関数は利用する。
  * 
- * Update: ヘッダー位置変更に対応するため、列指定を動的に変更
- * Update: プロンプトの大幅改修とGems形式（テキスト形式）出力への対応
+ * Update: 推論精度の高い Gemini Pro モデルを使用し、思考プロセス（analysis）を経てから文面生成を行う「Chain of Thought」構成に変更
  */
 
 // 定数定義
 const MULTI_SHEET_NAME = '複数社検討シート';
 const SOURCE_SHEET_NAME = 'シート1';
 const MULTI_MAX_PER_RUN = 5; // 1回の実行で処理する最大件数
+
+// ユーザー指定の「推論用高精度モデル」
+// ※ 一般的に Pro = "gemini-1.5-pro" です。ユーザー指定の "2.5" があればそれに書き換えてください。
+const GEMINI_HIGH_QUALITY_MODEL = 'gemini-2.5-pro';
 
 // コード.js にある FIXED_FOOTER を複製
 const FIXED_FOOTER_MULTI = `
@@ -65,116 +67,103 @@ Speee / メルカリ / レバレジーズ
 // 新プロンプト定義（ユーザー指定の内容 + データ注入部）
 const MULTI_SCOUT_PROMPT = `
 あなたは、人材紹介会社「株式会社BOX」のスカウト文面作成パートナーです。
-今回は、2〜3社の企業をまとめてご紹介する「複数社スカウトメール」を作成します。求職者に「刺さる」スカウトを作るため、以下のルールに従ってください。
+これより2つの企業情報を入力します。その内容を深く分析し、比較・統合した上で、候補者に「刺さる」スカウトメールを作成してください。
+
+【プロセス指示】
+モデルとして以下の思考プロセスを経て、最終的なJSONを出力してください。
+1. **分析（Analysis）**: 各企業の特徴（DNA）や「なぜ伸びているか（Growth Factor）」を言語化し、2社の関係性を定義する。
+2. **スコアリング（Scoring）**: 後述する3つの構造パターン（A/B/C）に対し、今回の2社との適合度を0〜10点で採点する。
+   - A（対比）: 違いが明確か？
+   - B（共鳴）: 共通のテーマは深いか？
+   - C（資産）: キャリア資産性は高いか？
+3. **戦略決定（Strategy）**: スコアが「7点以上」のパターンの中から、最も効果的な1つを選択する。
+   - ※重要: 特定のパターンに偏らないよう、有効な選択肢が複数ある場合は柔軟に選ぶこと。
+4. **生成（Generation）**: 決定した戦略に従って文面を作成する。
+
 ------------------------------------------------
-【ターゲット像（固定前提）】
-- 想定読者は「営業経験者」です。
-- 成長やキャリアアップ、将来のマネジメント層へのステップに関心がある人を想定してください。
-- ただし、転職後のポジションは営業に限らず多岐にわたる前提とし、「SaaS営業」「IT営業」など、特定の業種・職種に限定する表現は避けてください。
+【ターゲット像の動的定義】
+ターゲットは固定ではありません。今回の「2社の組み合わせ」から最も惹きつけられる人物像を逆算して定義してください。
+例：Startup × Startup なら「カオスを楽しめる人」、Startup × Mega なら「環境を選びたい人」、HR Tech × HR Tech なら「業界を変えたい人」。
+
 ------------------------------------------------
-【業種・職種に関する禁止事項】
-- 「SaaS」「IT企業」「Web業界」「広告業界」など、入力に書かれていない業種ラベルを推測で付与することは禁止です。
-- 入力文に明記されていない業界名・職種名を勝手に補うことは禁止です。
-- SaaS特有の用語（ARR、MRR など）や、特定業界の常識を前提にした表現は、入力文に明記されている場合を除き使用しないでください。
-- 業界ラベルではなく、「どのような事業フェーズか」「どのようなスキルが伸びる環境か」など、キャリア軸・フェーズ軸で表現してください。
+【構造（A/B/C）の定義】
+
+■ **A：環境選択型 / The Choice（対比）**
+- **適合度基準**: カルチャーやフェーズ、成長メカニズムの違いが「ハッキリしている」ほど高得点。
+- **ロジック**: 「あなたはどちらの環境で輝きますか？」という問いかけ。
+- **構成**: 挨拶 → 各社の違いを際立たせた紹介 → 選択の提案 → クロージング
+
+■ **B：テーマ・ミッション型 / The Theme（共鳴）**
+- **適合度基準**: 業界トレンド、社会課題、ミッションの共通性が「深い」ほど高得点。
+- **ロジック**: 「この巨大な波（トレンド）に乗りませんか？」という招待。
+- **構成**: フック（業界の波）→ 共通課題 → その先駆者としての2社紹介 → クロージング
+
+■ **C：キャリア資産・ROI型 / The Asset（実利・未来）**
+- **適合度基準**: 「出身者ブランド（Alumni）」や「希少スキル（Deep Skill）」の獲得価値が「高い」ほど高得点。
+- **ロジック**: 「この会社での経験は、あなたのキャリアにおける"資産"になります」という投資対効果。
+- **構成**: 単刀直入な導入 → 得られる3つの資産/メリット → クロージング
+- **注意**: 以前の「ポジション提案」ではなく、「得られるスキル/経験/実績」に焦点を当てること。
+
 ------------------------------------------------
-【文章表現に関する禁止事項と代替案】
-企業情報に載っている場合を除いて、以下の表現は使用せず、右側の代替案や、より自然な文脈に書き換えてください。
-- 貴殿　　　→ {相手の名前}様
-- 極めて　　→ 非常に / とても
-- まさに　　→ （削除する） / ～のような / ～そのもの
-- 確信した　→ 感じております / 考えております
-- 最適　　　→ マッチする / 親和性が高い
-- 強く惹かれ → 大変興味を持ち / 魅力を感じ
-- 不可欠　　→ 重要 / カギとなる
-- 稀有な　　→ 貴重な / ユニークな
-- 最高　　　→ 素晴らしい / 非常に魅力的な
-- 具体的職種・部署名禁止（配属リスク回避）
-- 推測での断言禁止（デカコーンに成長中！ など）
+【モード（1/2）の定義：訴求の「トーン」で選ぶ】
+
+■ **1：Willモード（情熱・想い）**
+- **キーワード**: ミッション、カオス、組織づくり、人、熱狂。
+- **トーン**: エモーショナル、熱い、主観的。
+- **対象**: 「ワクワクしたい」「誰と働くか」を重視する人。
+
+■ **2：Logicモード（合理的・勝算）**
+- **キーワード**: 勝ち筋、市場シェア、プロダクト優位性、キャリアハック。
+- **トーン**: クール、戦略的、客観的。
+- **対象**: 「負け戦はしたくない」「確実にスキルをつけたい」と考える合理的な人。
+
 ------------------------------------------------
-【入力として与えられるもの】
-ユーザーから、2社分についてそれぞれ以下が与えられます。
-- 企業名
-- その企業向けに過去に作成した「単社スカウト本文」
-単社スカウト本文は、「その企業の特徴・フェーズ・ウリを候補者向けに説明した文章」として扱ってください。
+【禁止事項・制約】
+- 「SaaS」「IT業界」など、入力にない情報を勝手に補完しない。
+- 以下のワードは禁止（代替表現を使うこと）：
+  - 貴殿 → 
+  - 極めて → 非常に
+  - まさに → （削除 or 言い換え）
+  - 確信した → 感じております
+  - 最適 → マッチする
+  - 不可欠 → 重要
+  - 稀有な → 貴重な / ユニークな
+  - 最高 → 素晴らしい
+
 ------------------------------------------------
-【内部プロセス（あなたの頭の中で行い、出力はしない）】
-1. それぞれの単社スカウト本文を読み、各社について以下を頭の中で整理してください（推測は控えめに、本文に書かれている内容をベースとする）：
-   - その企業が求めていそうな人材像（ペルソナ）
-   - その企業の「最大のウリ（Growth Factor）」
-   - 会社概要（2〜3文程度の要約）
-2. 2〜3社を横並びで見比べ、共通するキャリア軸・魅力や、逆に際立つ個性を特定してください。
-   例：
-   - 「営業経験を土台に、事業づくりに関われる」
-   - 「成長フェーズの事業で裁量を持てる」
-   - 「将来のマネジメント候補として育っていける」
-3. メール全体として採用する「構造（A/B/C）」と「モード（1/2）」を1つ選んでください。
-
-【構造（A/B/C）の意味・選定基準】（※以下の3つにほぼ均等に振り分けることを目指す）
-- **A：網羅型（比較検討層）**
-  - 判定基準：候補者が「自身のキャリアにとってのメリット・デメリットを冷静に見比べたい」タイプ。
-  - 必要要素：企業ごとの方向性・条件・フェーズを整理し、比較しやすい形で提示する。
-- **B：手紙型（共感・ビジョン重視層）**
-  - 判定基準：候補者が「条件よりも、ワクワクするビジョンや物語に心を動かされる」タイプ。
-  - 必要要素：2社の共通する世界観・熱量・ミッションを語り、感情に訴えるストーリーを構築する。
-- **C：要点直球型（合理・スピード重視層）**
-  - 判定基準：候補者が「前置きは不要で、機会や実利を単刀直入に知りたい」タイプ。
-  - 必要要素：要点だけを簡潔に列挙し、忙しいターゲットに即座に価値を伝える。
-
-【モード（1/2）の選定基準】
-- **1：情熱キャリアモード（未来への期待）**
-  - キーワード：社会課題解決、組織づくり、カオス、ミッションドリブン
-  - 適用例：スタートアップ、ミッション重視のベンチャー、成長段階の事業
-- **2：市場分析モード（合理的ロジック）**
-  - キーワード：プラットフォーム、成長率、マーケットシェア、プロダクト価値
-  - 適用例：成熟したSaaS、Fintech、コンサル出身者向けの実績重視案件
-
-【重要：出力ルール（必須）】
-- 出力は「JSON のみ」で返してください（他テキストや説明は一切禁止）。
-- JSON に必ず以下のフィールドを含めること:
-  - "pattern": 選択した組み合わせ（例: "B・1"）
-  - "pattern_reason": 選択理由を日本語で「短い一文」（例: 「知名度: 中 / ターゲット層: 成長志向 / フェーズ: 拡大期」）
-
-3. 選んだパターンに従って、
-   - 候補者向けのメール件名（1つ）
-   - スカウト本文（1通）
-   を作成する。
--------------------------------------
-【構成に関する詳細ルール】
-【全体共通ルール】
-- 太字（**太字**）や装飾記号（###、■■など）は一切使用禁止。
-- 見出しは必ず【見出し】の形式で統一すること。
-- A：網羅型
-  - 挨拶 → 企業紹介 → オススメポイント → クロージング → 固定フッター
-- B：手紙型
-  - フック → 課題提示 → 提案 → クロージング → 固定フッター
-- C：要点直球型
-  - 挨拶 → 要点リスト → クロージング → 固定フッター
-【件名の作成ルール】
-- 構造の異なる以下の3パターンを比較し、今回の企業に最適と判断した“1パターンだけ”を採用し件名を1つ作成する。
-  - ミッション/進化型（企業の挑戦テーマ重視）
-  - タグ/ブランド型（【】で並べる形式）
-  - インパクト/機会型（フェーズの希少性）
-
-【固定フッター】
-本文の最後には、次のフッターをそのまま挿入してください（改変禁止・{担当者名}もそのまま出力）:
-
-${FIXED_FOOTER_MULTI}
-
-【対象企業情報】
+【入力データ】
 ■1社目：{companyA_Name}
 {companyA_Body}
 
 ■2社目：{companyB_Name}
 {companyB_Body}
+
+------------------------------------------------
+【出力フォーマット（JSON Only）】
+必ず以下のJSON形式のみを出力してください。Markdown記法や前置きは不要です。
+
+{
+  "analysis": {
+    "company_A_dna": "1社目の特徴（50文字以内）",
+    "company_B_dna": "2社目の特徴（50文字以内）",
+    "relationship": "2社の関係性（例: 成長フェーズの対比構造 / ◯◯業界の共闘構造）",
+    "scores": {
+        "A_Contrast": 8,
+        "B_Theme": 6,
+        "C_Asset": 9
+    },
+    "selected_pattern_reason": "スコアに基づき、なぜそのパターンを選んだかの理由"
+  },
+  "subject": "件名（パターンに合わせて作成）",
+  "body_main": "本文（挨拶からクロージングまで。フッターは含めない）",
+  "pattern": "A・1 などの記号",
+  "pattern_reason": "選択理由（短く）"
+}
 `.trim();
 
 
 /**
  * ヘッダー名から列番号（1-based）を取得するヘルパー関数
- * @param {Sheet} sheet
- * @param {string} headerName
- * @returns {number} 1-based index (見つからない場合は -1)
  */
 function getColumnIndex(sheet, headerName) {
     const lastCol = sheet.getLastColumn();
@@ -211,12 +200,9 @@ function transferSingleScoutData() {
         Logger.log(`シート「${SOURCE_SHEET_NAME}」が見つかりません。`);
         return;
     }
-    // ソース側の列特定 (企業名, 本文, パターン)
-    // ※もしシート1のヘッダー名が固定でないならここも修正が必要だが、
-    //   一般的にコード.jsと合わせるため、既存カラム名「企業名」「本文」「パターン」を想定
-    //   見つからない場合は従来の固定列(A=1, D=4, F=6)にフォールバックする安全策をとる
+
     let srcIdxName = getColumnIndex(sourceSheet, '企業名');
-    let srcIdxBody = getColumnIndex(sourceSheet, '本文'); // または 'スカウト本文'
+    let srcIdxBody = getColumnIndex(sourceSheet, '本文');
     let srcIdxPattern = getColumnIndex(sourceSheet, 'パターン');
 
     // フォールバック
@@ -224,14 +210,11 @@ function transferSingleScoutData() {
     if (srcIdxBody === -1) srcIdxBody = 4; // D
     if (srcIdxPattern === -1) srcIdxPattern = 6; // F
 
-    Logger.log(`Source Columns - Name:${srcIdxName}, Body:${srcIdxBody}, Pattern:${srcIdxPattern}`);
-
     const sourceLastRow = sourceSheet.getLastRow();
     if (sourceLastRow < 2) {
         Logger.log('参照元のデータがありません。');
         return;
     }
-    // 全データ取得 (行ごとに処理)
     const sourceC = sourceSheet.getLastColumn();
     const sourceValues = sourceSheet.getRange(2, 1, sourceLastRow - 1, sourceC).getValues();
 
@@ -304,72 +287,36 @@ function transferSingleScoutData() {
 
 /**
  * Geminiのレスポンスをパースする関数
- * JSONフォーマット または "Gems用簡易形式" (Key-Value テキスト) の両方に対応
- * @param {string} text
- * @returns {object|null} { subject, body, pattern, pattern_reason }
+ * JSONフォーマット (analysisブロック付き) に対応
  */
 function parseGeminiResponse(text) {
     if (!text) return null;
     let cleaned = text.trim();
 
-    // 1. JSONパースを試みる
-    let jsonResult = null;
     // コードブロック除去
     if (cleaned.startsWith('```')) {
-        const blockRemoved = cleaned.replace(/^```[a-z]*\n/i, '').replace(/\n```$/, '');
+        cleaned = cleaned.replace(/^```[a-z]*\n/i, '').replace(/\n```$/, '');
+    }
+
+    // JSON部分抽出
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+        const sub = cleaned.substring(firstBrace, lastBrace + 1);
         try {
-            jsonResult = JSON.parse(blockRemoved);
-        } catch (e) { }
-    } else {
-        // 最初の { から 最後の } までを切り出し
-        const firstBrace = cleaned.indexOf('{');
-        const lastBrace = cleaned.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace > firstBrace) {
-            const sub = cleaned.substring(firstBrace, lastBrace + 1);
-            try {
-                jsonResult = JSON.parse(sub);
-            } catch (e) { }
+            const json = JSON.parse(sub);
+            // 正規化
+            if (json.body && !json.body_main) {
+                json.body_main = json.body;
+            }
+            return json;
+        } catch (e) {
+            Logger.log('JSON Parse Error: ' + e.message);
         }
     }
 
-    if (jsonResult) {
-        return jsonResult;
-    }
-
-    // 2. Gems簡易形式 (テキスト) のパース
-    // フォーマット:
-    // 件名：
-    // ...
-    // 本文：
-    // ...
-    // pattern：
-    // ...
-    // pattern_reason：
-    // ...
-
-    const result = {};
-
-    // 正規表現で各セクションを抽出
-    // (?=...) 先読みを使って次のセクション見出しの手前までを取得する
-    const subjectMatch = cleaned.match(/件名[：:]\s*([\s\S]*?)(?=\n\s*(本文|pattern|パターン)[：:])/i);
-    const bodyMatch = cleaned.match(/本文[：:]\s*([\s\S]*?)(?=\n\s*(pattern|パターン)[：:])/i);
-
-    // パターンと理由は後ろにあることが多いので、残りを柔軟に取る
-    const patternMatch = cleaned.match(/pattern[：:]\s*([A-C]・?[12])?/i);
-    // pattern_reason は最後に来ることが多い
-    const reasonMatch = cleaned.match(/pattern_reason[：:]\s*([\s\S]*)$/i);
-
-    if (subjectMatch) result.subject = subjectMatch[1].trim();
-    if (bodyMatch) result.body = bodyMatch[1].trim();
-    if (patternMatch && patternMatch[1]) result.pattern = patternMatch[1].trim();
-    if (reasonMatch) result.pattern_reason = reasonMatch[1].trim();
-
-    // 必須項目が取れていれば採用
-    if (result.subject && result.body) {
-        return result;
-    }
-
-    Logger.log('パース失敗: JSONでもGems形式でも解釈できませんでした。');
+    Logger.log('パース失敗: JSON構造が見つかりません。');
     return null;
 }
 
@@ -377,6 +324,7 @@ function parseGeminiResponse(text) {
 /**
  * 2. generateMultiScoutMails()
  * 複合スカウト文面を生成する（本番実行用）。
+ * 高精度モデル (Pro) を呼び出す。
  */
 function generateMultiScoutMails() {
     const ss = SpreadsheetApp.getActive();
@@ -409,13 +357,14 @@ function generateMultiScoutMails() {
     let processedCount = 0;
 
     for (let i = 0; i < values.length; i++) {
-        if (processedCount >= MULTI_MAX_PER_RUN) break;
+        // if (processedCount >= MULTI_MAX_PER_RUN) break; 
+        // ユーザー要望のProモデル使用に伴い処理時間を考慮して件数制限は維持、または減らすことも検討
 
         const row = values[i];
         const rowIndex = i + 2;
 
         const status = String(row[colStatus - 1]);
-        if (status === 'done') continue;
+        if (status === 'done') continue; // 完了済みはスキップ
 
         const company1 = row[colName1 - 1];
         const company2 = row[colName2 - 1];
@@ -439,9 +388,10 @@ function generateMultiScoutMails() {
             .replace('{companyA_Body}', body1)
             .replace('{companyB_Body}', body2);
 
-        Logger.log(`Row ${rowIndex}: Gemini 生成開始...`);
-        // コード.jsの callGemini は変更せずそのまま使う
-        const responseText = callGemini(prompt);
+        Logger.log(`Row ${rowIndex}: Gemini (${GEMINI_HIGH_QUALITY_MODEL}) 生成開始...`);
+
+        // ★ここで高精度モデルを指定して呼び出す
+        const responseText = callGemini(prompt, GEMINI_HIGH_QUALITY_MODEL);
 
         if (!responseText) {
             Logger.log(`Row ${rowIndex}: Geminiレスポンスなし`);
@@ -449,7 +399,7 @@ function generateMultiScoutMails() {
             continue;
         }
 
-        // 新しいパース関数を利用
+        // パース
         const json = parseGeminiResponse(responseText);
         if (!json) {
             Logger.log(`Row ${rowIndex}: パース失敗`);
@@ -457,15 +407,24 @@ function generateMultiScoutMails() {
             continue;
         }
 
+        // 推論結果(analysis)があればログに出すか、reasonに入れる
+        let reason = json.pattern_reason || '';
+        if (json.analysis && json.analysis.strategy_reason) {
+            reason = `【戦略】${json.analysis.strategy_reason} (Pattern: ${reason})`;
+        }
+
         sheet.getRange(rowIndex, colOutSubject).setValue(json.subject || '');
-        sheet.getRange(rowIndex, colOutBody).setValue(json.body || '');
+        sheet.getRange(rowIndex, colOutBody).setValue(json.body_main || json.body || '');
         sheet.getRange(rowIndex, colOutPattern).setValue(json.pattern || '');
-        sheet.getRange(rowIndex, colOutReason).setValue(json.pattern_reason || '');
+        sheet.getRange(rowIndex, colOutReason).setValue(reason);
         sheet.getRange(rowIndex, colStatus).setValue('done');
         sheet.getRange(rowIndex, colErr).clearContent();
 
         processedCount++;
-        Logger.log(`Row ${rowIndex}: 生成完了`);
+        Logger.log(`Row ${rowIndex}: 生成完了 (Pattern: ${json.pattern})`);
+
+        // ProモデルはRate Limitに引っかかりやすいので少しWaitを入れる
+        Utilities.sleep(1000);
     }
 
     if (processedCount > 0) {
