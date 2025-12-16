@@ -3,11 +3,58 @@ const SHEET_NAME = 'シート1'; // シート名
 const MAX_PER_RUN = 10;         // 1回の実行で処理する最大件数
 
 // 使用するGeminiモデル
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-2.5-pro';
 const GEMINI_ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 // 固定フッター（本文末尾にコード側で付与する）
+const FIXED_FOOTER = `
+  ▼ 私が提供できる価値
+
+コロナ禍明けから選考ハードルが高い状態ですが、直近3ヶ月で書類通過率84％（※転職平均30％）を実現しており、72％の方が内定獲得しています。
+
+その要因としては、下記の2点がございます。
+
+【1】企業別の面接対策を行い、希望者に合計10回以上の徹底的な言語化のサポート
+　┗※過去の面接データや非公開情報を元に対策し、年収アップの転職を実現しています。
+
+【2】会計事務所として関わり、経営陣との距離感がかなり近いため口添えできる
+　┗※本来は書類見送りの方も、弊社の紹介であれば選考を通して頂いております。
+
+■■■■■■■■■■■■■■■■■■■
+▽その他ご提案先の一部をご紹介します▽
+マネーフォワード / kubell / ユーザベース
+LegalForce / SATORI / オープンエイト
+カミナシ / Sales Marker / プレイド
+アンドパッド / LayerX / ヤプリ / スタディスト / freee
+ビットキー / BASE / ROXX / プレックス
+dely / ポジウィル / フェズ
+スマートニュース / ビズリーチ
+Speee / メルカリ / レバレジーズ
+
+◆直近の私の支援実績 ※一部のみ抜粋◆
+------------------------------
+(1) 30歳 / 男性 / Sier（年収590万円）
+　┗▶︎ 大手SaaS / FS（年収700万円）
+(2) 32歳 / 女性 / 未上場SaaS（年収540万円）
+　┗▶︎ 上場SaaS / CS（年収640万円）
+(3) 33歳 / 女性 / 大手百貨店マネージャー（年収480万円）
+　┗▶︎ 大手人材系 / 新規事業部 / 法人営業（年収500万円）
+(4) 35歳 / 女性 / 大手メディア / 営業マネージャー（年収900万円）
+　┗▶︎ 上場SaaS / 営業マネージャー（年収1,000万円）
+
+◆面談について◆
+・面談手法：全てWEB完結です
+・所要時間：30分程度
+週によっては土日祝もご対応可能です。
+
+//////////////////////////////////////////////
+株式会社BOX
+採用支援事業部マネージャー
+{担当者名}
+〒150-0031 東京都渋谷区桜丘町9－8 ＫＮ渋谷3ビル 2F
+//////////////////////////////////////////////
+`.trim();
 /**
  * メイン関数：
  * - シートのA,B列を読み取り
@@ -102,7 +149,9 @@ function generateScoutMails() {
     Logger.log(`処理完了：${processed} 件を更新しました。`);
   } catch (e) {
     Logger.log(e.stack);
-    SpreadsheetApp.getUi().alert(`エラーが発生しました: ${e.message}`);
+    // UIが使用できないコンテキスト（トリガー実行など）を考慮し、alertではなくログ出力に留める
+    console.error(`エラーが発生しました: ${e.message}`);
+    Logger.log(`エラーが発生しました: ${e.message}`);
   }
 }
 
@@ -344,29 +393,54 @@ function callGemini(prompt, modelName) {
     muteHttpExceptions: true,
   };
 
-  const res = UrlFetchApp.fetch(endpoint, options);
-  const code = res.getResponseCode();
-  const text = res.getContentText();
+  // リトライロジック (最大3回 / 指数バックオフ)
+  const maxRetries = 3;
+  let attempt = 0;
 
-  if (code !== 200) {
-    Logger.log(`Gemini API error (Model: ${useModel}): ` + code + ' ' + text);
-    return null;
+  while (attempt < maxRetries) {
+    try {
+      const res = UrlFetchApp.fetch(endpoint, options);
+      const code = res.getResponseCode();
+      const text = res.getContentText();
+
+      if (code === 200) {
+        // 成功
+        const data = JSON.parse(text);
+        const candidates = data.candidates;
+        if (!candidates || !candidates.length) {
+          Logger.log('Gemini: candidates が空です。');
+          return null;
+        }
+        const content = candidates[0].content;
+        if (!content || !content.parts || !content.parts.length) {
+          Logger.log('Gemini: content.parts が空です。');
+          return null;
+        }
+        return content.parts[0].text.trim();
+      }
+
+      // 一時的なエラーの場合はリトライ (429: Too Many Requests, 503: Service Unavailable)
+      if (code === 429 || code === 503) {
+        attempt++;
+        if (attempt < maxRetries) {
+          const waitTime = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s...
+          Logger.log(`Gemini API Error (${code}). Retrying in ${waitTime}ms... (Model: ${useModel})`);
+          Utilities.sleep(waitTime);
+          continue;
+        }
+      }
+
+      // リトライ対象外、または回数切れ
+      Logger.log(`Gemini API error (Model: ${useModel}): ` + code + ' ' + text);
+      return null;
+
+    } catch (e) {
+      Logger.log(`UrlFetchAuth Error: ${e.message}`);
+      return null;
+    }
   }
 
-  const data = JSON.parse(text);
-  const candidates = data.candidates;
-  if (!candidates || !candidates.length) {
-    Logger.log('Gemini: candidates が空です。');
-    return null;
-  }
-
-  const content = candidates[0].content;
-  if (!content || !content.parts || !content.parts.length) {
-    Logger.log('Gemini: content.parts が空です。');
-    return null;
-  }
-
-  return content.parts[0].text.trim();
+  return null;
 }
 
 /**
