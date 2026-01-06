@@ -129,13 +129,12 @@ function generateScoutMails() {
         Logger.log(`Row ${rowIndex}: モデルの選択理由は出力されていませんでした。`);
       }
 
-      const outCompany = json.company_name || companyName;
       const outSubject = json.subject || '';
       const bodyMain = json.body_main || json.body || '';
       const outBody = bodyMain ? `${bodyMain}\n\n${FIXED_FOOTER}` : FIXED_FOOTER;
       const outPattern = resolvePatternIdentifier(json.pattern, responseText, rowIndex);
 
-      sheet.getRange(rowIndex, 1).setValue(outCompany);
+      // 注意: 企業名（列1）は上書きしない（元の入力値を保持）
       sheet.getRange(rowIndex, 3).setValue(outSubject);
       sheet.getRange(rowIndex, 4).setValue(outBody);
       sheet.getRange(rowIndex, 5).setValue('done');
