@@ -3,7 +3,7 @@ const SHEET_NAME = 'シート1'; // シート名
 const MAX_PER_RUN = 10;         // 1回の実行で処理する最大件数
 
 // 使用するGeminiモデル
-const GEMINI_MODEL = 'gemini-2.5-pro';
+const GEMINI_MODEL = 'gemini-3-flash-preview';
 const GEMINI_ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
@@ -171,6 +171,24 @@ function buildPromptForCompany(companyName, companyInfo) {
 【制約事項】
 これまでの「知名度が高いからC」「スタートアップだからB」といった、属性に基づく機械的な判断ルールは**完全に忘れてください**。
 代わりに、「この企業の魅力を目の前の候補者に届けるには、どの《心理効果》を使うべきか？」という戦略的観点のみで判断してください。
+
+【重要：パターン選択の多様性（必読）】
+A/B/Cは「企業の属性」ではなく「誰に刺すか（ターゲットペルソナの心理）」で決まります。
+同じスタートアップでも、以下のように使い分けてください：
+- 慎重派・比較検討派に刺したい → A（網羅・安心材料で信頼を勝ち取る）
+- ワクワク・挑戦志向に刺したい → B（ビジョン・熱量で共感を生む）
+- 多忙・即決派に刺したい → C（端的・インパクトで即座に価値を伝える）
+
+※ 単に「スタートアップだからB」「有名企業だからC」という短絡的判断は禁止です。
+※ 企業情報から「どのタイプの候補者が最もフィットするか」を推論し、そのペルソナに最適な戦略を選んでください。
+
+【警告：Cパターンへの偏り禁止】
+C（効率インパクト戦略）は便利ですが、**すべての企業にCを使うのは禁止**です。
+- スタートアップでも「安心感を求める候補者」には A が有効
+- スタートアップでも「ビジョンに共感する候補者」には B が有効
+- Cは「本当に多忙なハイレイヤー」または「説明不要な超有名企業」に限定
+
+A/B/Cの選択理由は「ペルソナの心理」に言及し、「勢いがあるからC」のような企業属性だけの理由は避けてください。
 
 ---
 【タスクの全体像】
@@ -452,14 +470,22 @@ function normalizePattern(rawPattern) {
     .replace(/[･・\.\/-]/g, '・')
     .toUpperCase();
 
+  // フルフォーマット: A・1, B・2 など
   let match = normalized.match(/^([ABC])・?([12])$/);
   if (match) {
     return `${match[1]}・${match[2]}`;
   }
 
+  // 部分マッチ: テキスト内に A・1 が含まれる場合
   match = normalized.match(/([ABC])・?([12])/);
   if (match) {
     return `${match[1]}・${match[2]}`;
+  }
+
+  // モード番号なしのパターン (A, B, C のみ) を許容
+  match = normalized.match(/^([ABC])$/);
+  if (match) {
+    return match[1];  // モード番号なしで返す
   }
 
   return '';
